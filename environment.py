@@ -1,6 +1,5 @@
 import math
 import numpy as np
-from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from agent import Car
 import pygame
 
@@ -26,17 +25,18 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
     outer_radius = (grid_size // 2) - 2  # Slightly smaller to ensure visibility
     inner_radius = outer_radius - track_width
 
-    # Create track
+    # Create the track
     for y in range(grid_size):
         for x in range(grid_size):
             distance = math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
             if inner_radius <= distance < outer_radius:
                 track.add((x, y))
 
-    # Create checkpoints
+    # Calculate angular positions of checkpoints
+    angle_step = 360 / num_checkpoints
     for i in range(num_checkpoints):
         checkpoint = []
-        angle = (i * 360 / num_checkpoints)
+        angle = (i + 4) * angle_step  # Evenly distributed angles
         rad_angle = math.radians(angle)
         
         # Calculate the base point on the middle of the track
@@ -44,8 +44,7 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
         base_x = center_x + mid_radius * math.cos(rad_angle)
         base_y = center_y + mid_radius * math.sin(rad_angle)
         
-        # For top and bottom positions (near 90° or 270°), make checkpoint vertical
-        # For sides (near 0° or 180°), make checkpoint horizontal
+        # Decide if the checkpoint is horizontal or vertical
         is_horizontal = abs(math.sin(rad_angle)) < 0.707  # cos(45°) ≈ 0.707
         
         for w in range(-track_width - 1, track_width + 2):
@@ -64,18 +63,21 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
         if checkpoint:
             checkpoints.append(checkpoint)
 
-    # Create start line - one column wide at only the bottom half of center
+    # Create the start line
     start_line = []
     start_x = center_x  # Center position
-    # Only check positions in the lower half of the grid
-    for y in range(grid_size // 2, grid_size):  # Start from middle down
+    for y in range(grid_size // 2, grid_size):  # Only lower half of the grid
         if (start_x, y) in track:
             start_line.append((start_x, y))
 
+    # Ensure the last checkpoint overlaps the start line
+    if checkpoints:
+        checkpoints[-1].extend(start_line)
+
     return track, checkpoints, start_line
 
-class MultiCarRacing(MultiAgentEnv):
-    def __init__(self, n_cars: int, grid_size: int, track_width: int, render_mode=None):
+class MultiCarRacing():
+    def __init__(self, n_cars: int = 4, grid_size: int = 30, track_width: int = 5, num_checkpoints: int = 12, render_mode=None):
         super().__init__()
         self.n_cars = n_cars
         self.grid_rows = grid_size
@@ -84,7 +86,7 @@ class MultiCarRacing(MultiAgentEnv):
         
         # Create track first
         self.track, self.checkpoints, self.start_line = create_track_and_checkpoints(
-            grid_size, track_width, 12
+            grid_size, track_width, num_checkpoints
         )
         
         # Initialize agents with starting positions
@@ -167,7 +169,7 @@ class MultiCarRacing(MultiAgentEnv):
             for agent_id, agent in self.agents.items():
                 agent.position = intended_position[agent_id]
 
-                if intended_position in self.checkpoints[agent.checkpoint_counters]:
+                if agent.position in self.checkpoints[agent.checkpoint_counters]:
                     agent.reward += 5
                     agent.checkpoint_counters += 1
 
