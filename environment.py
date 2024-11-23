@@ -175,6 +175,7 @@ class MultiCarRacing():
 
                     if agent.checkpoint_counters >= len(self.checkpoints):
                         agent.done = True
+                        agent.checkpoint_counters = 0
                 agent.observation = self.get_observation(agent_id)
                 self.dones[agent_id] = agent.done
             
