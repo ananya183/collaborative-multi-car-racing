@@ -23,44 +23,56 @@ def create_track_and_checkpoints(grid_size: int, track_width: int, num_checkpoin
 
     # Define the center and radius for the circular track
     center_x, center_y = grid_size // 2, grid_size // 2
-    outer_radius = grid_size // 2 - 1
+    outer_radius = (grid_size // 2) - 2  # Slightly smaller to ensure visibility
     inner_radius = outer_radius - track_width
 
     # Create track
-    for x in range(grid_size):
-        for y in range(grid_size):
+    for y in range(grid_size):
+        for x in range(grid_size):
             distance = math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
-            if inner_radius < distance < outer_radius:
+            if inner_radius <= distance < outer_radius:
                 track.add((x, y))
 
-    for angle in range(0, 360, 360 // num_checkpoints):
+    # Create checkpoints
+    for i in range(num_checkpoints):
         checkpoint = []
+        angle = (i * 360 / num_checkpoints)
         rad_angle = math.radians(angle)
         
-        # Calculate the center point of this checkpoint strip
-        center_checkpoint_x = center_x + (inner_radius + track_width / 2) * math.sin(rad_angle)
-        center_checkpoint_y = center_y - (inner_radius + track_width / 2) * math.cos(rad_angle)
+        # Calculate the base point on the middle of the track
+        mid_radius = (inner_radius + outer_radius) / 2
+        base_x = center_x + mid_radius * math.cos(rad_angle)
+        base_y = center_y + mid_radius * math.sin(rad_angle)
         
-        # Calculate the perpendicular angle for the checkpoint strip (90 degrees offset)
-        perp_angle = rad_angle + math.pi / 2
+        # For top and bottom positions (near 90° or 270°), make checkpoint vertical
+        # For sides (near 0° or 180°), make checkpoint horizontal
+        is_horizontal = abs(math.sin(rad_angle)) < 0.707  # cos(45°) ≈ 0.707
         
-        # Generate the entire track width for each checkpoint
-        for w in range(-track_width // 2, track_width // 2 + 1):
-            # Adjust position along the track
-            x = int(center_checkpoint_x + w * math.cos(perp_angle))
-            y = int(center_checkpoint_y + w * math.sin(perp_angle))
+        for w in range(-track_width - 1, track_width + 2):
+            if is_horizontal:
+                # Horizontal checkpoint (on sides)
+                x = int(base_x + w)
+                y = int(base_y)
+            else:
+                # Vertical checkpoint (top/bottom)
+                x = int(base_x)
+                y = int(base_y + w)
             
-            # Check if the coordinates are within grid bounds
-            if 0 <= x < grid_size and 0 <= y < grid_size:
+            if 0 <= x < grid_size and 0 <= y < grid_size and (x, y) in track:
                 checkpoint.append((x, y))
         
-        # If valid checkpoint generated, add it to checkpoints list
         if checkpoint:
             checkpoints.append(checkpoint)
 
-    return track, checkpoints
+    # Create start line - one column wide at only the bottom half of center
+    start_line = []
+    start_x = center_x  # Center position
+    # Only check positions in the lower half of the grid
+    for y in range(grid_size // 2, grid_size):  # Start from middle down
+        if (start_x, y) in track:
+            start_line.append((start_x, y))
 
-
+    return track, checkpoints, start_line
 
 class MultiCarRacing(MultiAgentEnv):
     def __init__(self, n_cars: int, grid_size: int, track_width: int, render_mode=None):
@@ -68,17 +80,23 @@ class MultiCarRacing(MultiAgentEnv):
         self.n_cars = n_cars
         self.grid_rows = grid_size
         self.grid_columns = grid_size
-        self.agents = {agent_id: Car(agent_id) for agent_id in range(n_cars)}
+        self.render_mode = render_mode
+        
+        # Create track first
+        self.track, self.checkpoints, self.start_line = create_track_and_checkpoints(
+            grid_size, track_width, 12
+        )
+        
+        # Initialize agents with starting positions
+        self.agents = {}
+        for agent_id in range(n_cars):
+            start_pos = self.start_line[agent_id % len(self.start_line)]
+            self.agents[agent_id] = Car(start_pos)
 
         self.action_space = {agent_id: [0, 1, 2, 3, 4] for agent_id in range(n_cars)}
         self.observation_space = {
-            agent_id :  np.zeros((grid_size, grid_size)) for agent_id in range(n_cars)
+            agent_id: np.zeros((grid_size, grid_size)) for agent_id in range(n_cars)
         }
-
-        self.track, self.checkpoints = create_track_and_checkpoints(grid_size, track_width, 12)
-
-        # Create start line at the top of the circle
-        self.start_line = [(grid_size // 2, w + 2) for w in range(track_width)]
 
         # Pygame Setup for rendering
         if render_mode == 'human':
@@ -86,18 +104,22 @@ class MultiCarRacing(MultiAgentEnv):
             self.screen = pygame.display.set_mode((SCREEN_SIZE, SCREEN_SIZE))
             pygame.display.set_caption("Multi-Agent Racetrack Environment")
             self.clock = pygame.time.Clock()
+            self.font = pygame.font.Font(None, 24)
 
 
     def reset(self):
-        self.rewards = {agent_id: 0 for agent_id in range(self.n_cars)}
-        self.dones = {agent_id: False for agent_id in range(self.n_cars)}
-
-        # reset car positions
+        # Reset each agent to its starting position
         for agent_id, agent in self.agents.items():
-            position = self.start_line[agent_id % len(self.start_line)]
-            agent.reset(position, self.observation_space)
-
-        return {agent_id: agent.observation for agent_id, agent in self.agents.items()}
+            start_pos = self.start_line[agent_id % len(self.start_line)]
+            agent.position = start_pos
+            agent.checkpoint_counters = 0
+            agent.collision_counter = 0
+            agent.done = False
+        
+        self.rewards = {agent_id: 0 for agent_id in self.agents}
+        self.dones = {agent_id: False for agent_id in self.agents}
+        
+        return {agent_id: self.get_observation(agent_id) for agent_id in self.agents}
     
     def step(self, action_dict):
 
@@ -168,7 +190,7 @@ class MultiCarRacing(MultiAgentEnv):
         if self.render_mode != "human":
             return
 
-        # Fill screen with white background
+        # Clear screen with white background
         self.screen.fill(WHITE)
         
         # Draw track
@@ -179,69 +201,66 @@ class MultiCarRacing(MultiAgentEnv):
                 (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
             )
         
+        # Draw start line
+        for x, y in self.start_line:
+            pygame.draw.rect(
+                self.screen,
+                GREEN,
+                (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+            )
+        
         # Draw checkpoints
         for i, checkpoint in enumerate(self.checkpoints):
-            # Use a gradient of colors from green to blue for checkpoints
             color = (
-                int(124 * (1 - i/len(self.checkpoints))),  # R
-                int(252 * (1 - i/len(self.checkpoints))),  # G
-                int(255 * (i/len(self.checkpoints)))       # B
+                int(124 + (131 * i/len(self.checkpoints))),  # R: 124 -> 255
+                int(252 - (252 * i/len(self.checkpoints))),  # G: 252 -> 0
+                int(0 + (255 * i/len(self.checkpoints)))     # B: 0 -> 255
             )
             for x, y in checkpoint:
                 pygame.draw.rect(
                     self.screen,
                     color,
                     (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE),
-                    1  # Draw just the border
+                    2  # Border thickness
                 )
-        
-        # Draw start line in green
-        for x, y in self.start_line:
-            pygame.draw.rect(
-                self.screen,
-                GREEN,
-                (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE),
-                2  # Thicker border for start line
-            )
         
         # Draw cars
         for agent_id, agent in self.agents.items():
-            x, y = agent.position
-            
-            # Calculate car color based on team (every 2 cars share a color)
-            color = CAR_COLORS[agent_id // 2 % len(CAR_COLORS)]
-            
-            # Draw car body
-            car_rect = pygame.Rect(
-                x * CELL_SIZE + 2,  # Add small padding
-                y * CELL_SIZE + 2,
-                CELL_SIZE - 4,
-                CELL_SIZE - 4
-            )
-            pygame.draw.rect(self.screen, color, car_rect)
-            
-            # Draw checkpoint counter on car
-            font = pygame.font.Font(None, 20)
-            text = font.render(str(agent.checkpoint_counters), True, BLACK)
-            text_rect = text.get_rect(center=(x * CELL_SIZE + CELL_SIZE//2,
-                                            y * CELL_SIZE + CELL_SIZE//2))
-            self.screen.blit(text, text_rect)
-            
-            # Draw collision indicator if car is in collision state
-            if agent.collision_counter > 0:
-                pygame.draw.circle(
-                    self.screen,
-                    (255, 0, 0),  # Red
-                    (x * CELL_SIZE + CELL_SIZE//2, y * CELL_SIZE - 5),
-                    3
-                )
+            if hasattr(agent, 'position'):  # Check if position exists
+                x, y = agent.position
+                color = CAR_COLORS[agent_id % len(CAR_COLORS)]
+                
+                # Draw car as a filled circle with a border
+                center = (int(x * CELL_SIZE + CELL_SIZE/2), 
+                         int(y * CELL_SIZE + CELL_SIZE/2))
+                radius = int(CELL_SIZE/2) - 2
+                
+                # Draw filled circle
+                pygame.draw.circle(self.screen, color, center, radius)
+                # Draw border
+                pygame.draw.circle(self.screen, BLACK, center, radius, 2)
+                
+                # Draw checkpoint counter
+                if hasattr(agent, 'checkpoint_counters'):
+                    text = self.font.render(str(agent.checkpoint_counters), True, BLACK)
+                    text_rect = text.get_rect(center=center)
+                    self.screen.blit(text, text_rect)
+                
+                # Draw collision indicator
+                if hasattr(agent, 'collision_counter') and agent.collision_counter > 0:
+                    pygame.draw.circle(
+                        self.screen,
+                        (255, 0, 0),  # Red
+                        (center[0], center[1] - CELL_SIZE//2 - 5),
+                        4
+                    )
         
         # Draw grid lines
-        for i in range(GRID_SIZE + 1):
+        for i in range(self.grid_rows + 1):
             # Vertical lines
             pygame.draw.line(
                 self.screen,
-                BLACK,
+                (200, 200, 200),  # Light gray
                 (i * CELL_SIZE, 0),
                 (i * CELL_SIZE, SCREEN_SIZE),
                 1
@@ -249,23 +268,27 @@ class MultiCarRacing(MultiAgentEnv):
             # Horizontal lines
             pygame.draw.line(
                 self.screen,
-                BLACK,
+                (200, 200, 200),  # Light gray
                 (0, i * CELL_SIZE),
                 (SCREEN_SIZE, i * CELL_SIZE),
                 1
             )
         
         # Add info text
-        font = pygame.font.Font(None, 24)
         y_offset = 10
         for agent_id, agent in self.agents.items():
-            text = f"Car {agent_id}: CP {agent.checkpoint_counters}/{len(self.checkpoints)}"
-            text_surface = font.render(text, True, CAR_COLORS[agent_id // 2 % len(CAR_COLORS)])
-            self.screen.blit(text_surface, (10, y_offset))
-            y_offset += 25
+            if hasattr(agent, 'checkpoint_counters'):
+                text = f"Car {agent_id}: CP {agent.checkpoint_counters}/{len(self.checkpoints)}"
+                text_surface = self.font.render(
+                    text, True, CAR_COLORS[agent_id % len(CAR_COLORS)]
+                )
+                self.screen.blit(text_surface, (10, y_offset))
+                y_offset += 25
 
         pygame.display.flip()
         self.clock.tick(10)  # 10 FPS
+    
+
     def close(self):
         if self.render_mode == "human":
             pygame.quit()
@@ -283,12 +306,12 @@ class MultiCarRacing(MultiAgentEnv):
             if other_agent_id == agent_id:
                 observation[pos[0], pos[1]] = 2
             else:
-                # If teammate 3
+                # If teammate 2
                 if (agent_id // 2) == (other_agent_id // 2):
-                    observation[pos[0], pos[1]] = 3
-                # If enemy 4
+                    observation[pos[0], pos[1]] = 2
+                # If enemy 3
                 else:
-                    observation[pos[0], pos[1]] = 4
+                    observation[pos[0], pos[1]] = 3
         
         return observation
             
