@@ -223,6 +223,19 @@ class MultiCarRacing(MultiAgentEnv):
                     (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE),
                     2  # Border thickness
                 )
+            
+            # Add checkpoint index number
+            # Get the middle point of the checkpoint
+            if checkpoint:  # Make sure checkpoint has points
+                mid_point = checkpoint[len(checkpoint)//2]
+                x, y = mid_point
+                # Render the checkpoint number
+                text = self.font.render(str(i), True, color)
+                text_rect = text.get_rect(center=(
+                    x * CELL_SIZE + CELL_SIZE/2,
+                    y * CELL_SIZE + CELL_SIZE/2
+                ))
+                self.screen.blit(text, text_rect)
         
         # Draw cars
         for agent_id, agent in self.agents.items():
